@@ -1,0 +1,263 @@
+---
+title: "ADA Final Data Analysis"
+author: "Patrick Cannon"
+date: "11/28/2021"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+
+pacman::p_load(ggplot2, tidyverse, ROCR, haven, readr, dplyr, forcats, table1, odds.n.ends, blorr, lmtest, car)
+```
+
+## Import and Clean BRFSS dataset (2020)
+```{r import}
+brfss <- read_xpt("LLCP2020.XPT")
+```
+
+## Data Preparation and Cleaning
+```{r dependent variable}
+## Dependent variable is coded CIMEMLOS, with question:
+## "During the past 12 months, have you experienced confusion or memory 
+## loss that is happening more often or is getting worse?"
+
+table(brfss$CIMEMLOS, useNA = "always") # determine initial count of each type
+```
+
+```{r recode DV}
+## make a binary cognitive decline variable that categorizes individuals into 
+## yes or no and excludes other responses
+brfss$cognitiveDecline_binary <- ifelse(brfss$CIMEMLOS == 2, 0, 
+                                        ifelse(brfss$CIMEMLOS == 1, 1, NA))
+```
+
+```{r factor DV}
+## make the binary into a factor variable
+brfss$cognitiveDecline_binary <- factor(brfss$cognitiveDecline_binary, 
+    levels = c(0,1), labels = c("No confusion or memory loss", 
+                                "Yes, confusion or memory loss"))
+
+label(brfss$cognitiveDecline_binary) <- "Does the respondent have confusion or memory loss in the past 30 days?"
+```
+
+```{r check DV recode}
+## check to make sure re-classification worked
+table(brfss$cognitiveDecline_binary, brfss$CIMEMLOS)
+table(brfss$cognitiveDecline_binary, useNA = "always")
+```
+
+```{r drop NAs}
+## omit NAs from dataset
+brfss <- brfss[which(!is.na(brfss$cognitiveDecline_binary)),]
+```
+
+```{r recode main predictor}
+## main predictor is sleep, so recode sleep
+brfss <- brfss[!(brfss$SLEPTIM1 == 77 | brfss$SLEPTIM1 == 99),] #remove unwanted numeric values
+brfss <- brfss[which(!is.na(brfss$SLEPTIM1)),] #also remove NAs
+label(brfss$SLEPTIM1) <- "Hours of sleep gotten on average in the past 30 days"
+```
+
+```{r code race category}
+# create race category
+
+brfss<-rename(brfss, "race"="_RACE")
+brfss$race[brfss$race==9] <- NA
+brfss <- brfss[which(!is.na(brfss$race)),]
+
+
+brfss <- brfss %>%
+  mutate(race_cat = factor(race, 1:8, c("White, non-Hispanic", "Black, non-Hispanic", "American Indian or Alaksa Native, non-Hispanic", "Asian, non-Hispanic", "Native Hawaiian or other Pacific Islander, non-Hispanic", "Other race, non-Hispanic", "Multiracial, non-Hispanic", "Hispanic"))) #make race as a factor variable
+
+label(brfss$race_cat) <- "Race/Ethnicity"
+```
+
+```{r recode diabetes}
+## clean the other moderating variables
+## diabetes
+brfss$diabetes_binary<-ifelse(brfss$DIABETE4==3| brfss$DIABETE4==4, 0, ifelse(brfss$DIABETE4==1|brfss$DIABETE4==2, 1, NA))
+brfss$diabetes_binary<-factor(brfss$diabetes_binary, levels=c(0,1), labels=c("No Diabetes", "Diabetes"))
+brfss<-brfss[which(!is.na(brfss$diabetes_binary)),]
+label(brfss$diabetes_binary) <- "Does the respondent have diabetes?"
+```
+
+```{r recode obesity}
+## obesity
+brfss$obesity_binary<-ifelse(brfss$"_RFBMI5"==1, 0, ifelse(brfss$"_RFBMI5"==2, 1, NA))
+brfss$obesity_binary<-factor(brfss$obesity_binary, levels=c(0,1), labels=c("Not Overweight or Obese", "Overweight or Obese"))
+brfss<-brfss[which(!is.na(brfss$"_RFBMI5")),]
+label(brfss$obesity_binary) <- "Is the respondent obese or overweight?"
+```
+
+```{r recode smoking}
+## smoking (at all)
+brfss$smoking_binary<-ifelse(brfss$SMOKDAY2==3, 0, ifelse(brfss$SMOKDAY2==1 | brfss$SMOKDAY2==2, 1, NA))
+brfss$smoking_binary<-factor(brfss$smoking_binary, levels=c(0,1), labels=c("Does not smoke", "Smokes"))
+brfss<-brfss[which(!is.na(brfss$SMOKDAY2)),]
+label(brfss$smoking_binary) <- "Does the respondent smoke at all"
+```
+
+```{r recode age}
+## age
+brfss<-rename(brfss, "age"="_AGEG5YR")
+brfss$age[brfss$age==14] <- NA
+brfss <- brfss[which(!is.na(brfss$age)),]
+
+## recoding age to 13 categories as per BRFSS
+brfss <- brfss %>%
+  mutate(age_cat = factor(age, 0:12, c("18-24", "25-29", "30-34", "35-39", "40-44", "45-49", "50-54", "55-59", "60-64", "65-69", "70-74", "75-79", "80 or older"))) #make age as a factor variable based on cohort
+
+label(brfss$age_cat) <- "Age cohort"
+```
+
+```{r recode sex}
+## Sex
+brfss$sex <- factor(brfss$SEXVAR, 
+    levels = c(1,2), labels = c("Male", 
+                                "Female"))
+```
+
+## Descriptives
+## Table 1
+
+```{r table 1}
+table_1 <- table1(~ diabetes_binary + obesity_binary + smoking_binary + age_cat + race_cat + SLEPTIM1 + cognitiveDecline_binary | sex, data = brfss, topclass="Rtable1-zebra", render.missing=NULL)
+table_1
+```
+
+## Analysis - Logistic Regressions
+
+```{r initial LR with sleep and DV}
+## Run a LR with number of hours slept as a numeric, continuous variable
+sleep_continuous_logit <- glm(cognitiveDecline_binary ~ SLEPTIM1 , data = brfss, family = "binomial")
+summary(sleep_continuous_logit)
+
+odds.n.ends(sleep_continuous_logit, predProbPlot = TRUE) # look at summary values from model
+```
+
+```{r recode sleep into categories}
+# Now, let's recode age to be in a range of 1-6, 7-9, and 10+ and see if there is a better prediction from there
+# this is because our linearity assumption was not met
+brfss$sleep_categories[(brfss$SLEPTIM1 >= 1 & brfss$SLEPTIM1 < 7)] <- 0
+brfss$sleep_categories[(brfss$SLEPTIM1 >= 7 & brfss$SLEPTIM1 < 10)] <- 1
+brfss$sleep_categories[(brfss$SLEPTIM1 >= 10 & brfss$SLEPTIM1 <= 24)] <- 2
+```
+
+```{r sleep categories}
+## make new factor variable for sleep categories
+brfss$sleep_categories <- factor(brfss$sleep_categories, levels = c(0:2), 
+                                 labels = c("1 to 6 hours of sleep per night", 
+                                            "7 to 9 hours of sleep per night", 
+                                            "10 or more hours of sleep per night"))
+```
+
+```{r check sleep recode}
+## check to see if recoding into factors worked
+by(brfss$SLEPTIM1, brfss$sleep_categories, summary)
+```
+
+```{r re-run original LR}
+## rerun the LR with sleep as categorical variable
+sleep_categorical_logit <- glm(cognitiveDecline_binary ~ sleep_categories , data = brfss, family = "binomial")
+summary(sleep_categorical_logit)
+
+odds.n.ends(sleep_categorical_logit, predProbPlot = TRUE) # look at summary values from model
+```
+
+```{r add confounders}
+## add age, sex, race, smoking, obesity, diabetes statuses as confounding variables
+sleep_categorical_logit_adjusted <- glm(cognitiveDecline_binary ~ sleep_categories + age_cat + race_cat + smoking_binary + obesity_binary + diabetes_binary, data = brfss, family = "binomial")
+summary(sleep_categorical_logit)
+
+odds.n.ends(sleep_categorical_logit_adjusted, predProbPlot = TRUE) # look at summary values from model
+```
+
+```{r check for EM}
+## incorporate an interaction term for sex and sleep categories to determine if there is any effect modification
+sleep_categorical_logit_adjusted_em <- glm(cognitiveDecline_binary ~sleep_categories*SEXVAR + age_cat + race_cat + smoking_binary + obesity_binary + diabetes_binary, data = brfss, family = "binomial")
+summary(sleep_categorical_logit)
+
+odds.n.ends(sleep_categorical_logit_adjusted_em, predProbPlot = TRUE) # look at summary values from model
+```
+
+```{r male OR}
+## look at male sex OR 
+sleep_categorical_logit_adjusted_em_male <- glm(cognitiveDecline_binary ~sleep_categories + age_cat + race_cat + smoking_binary + obesity_binary + diabetes_binary, data = brfss[which(brfss$SEXVAR==1),], family = "binomial")
+summary(sleep_categorical_logit)
+
+odds.n.ends(sleep_categorical_logit_adjusted_em, predProbPlot = TRUE) # look at summary values from model
+```
+
+```{r female OR}
+## look at OR for females
+sleep_categorical_logit_adjusted_em_female <- glm(cognitiveDecline_binary ~sleep_categories + age_cat + race_cat + smoking_binary + obesity_binary + diabetes_binary, data = brfss[which(brfss$SEXVAR==2),], family = "binomial")
+summary(sleep_categorical_logit)
+
+odds.n.ends(sleep_categorical_logit_adjusted_em, predProbPlot = TRUE) # look at summary values from model
+```
+
+## Assumption testing
+
+## All design assumptions were met. The outcome variable is a binary yes/no depdendent
+## variable. Independence of observations was met through the study design itself of
+## one response per person. Adequate sample size was met as the total number of samples was
+## well over 1000 people.
+## Data assumptions are tested below.
+
+```{r linearity assumption}
+# using Box-Tidwell to test linearity assumption for sleep
+brfss <- brfss %>%
+  mutate(sleep.times.logsleep = SLEPTIM1 * log(SLEPTIM1)) #create term to test linearity
+
+boxTidwellSleep <- glm(cognitiveDecline_binary ~ sleep_categories + sleep.times.logsleep, data = brfss, family = "binomial") #Box Tidwell technique, test the assumption of linearity
+
+summary(boxTidwellSleep)
+
+## since the interaction term is significant, the assumption of linearity is violated.
+```
+
+```{r multicollinearity assumption}
+## vif testing
+vif(sleep_categorical_logit_adjusted_em)
+
+## all VIF values are less than 4, which is acceptable to show that there is no MC.
+```
+
+```{r points of influence}
+## influence
+plot(sleep_categorical_logit_adjusted, which=4, id.n=5, col="red") 
+
+## Cook's D cutoff=0.0015
+cutoff <- 0.0015 
+
+## identify observations with a Cook's Distance greater than cutoff
+influential_points <- as.data.frame(cooks.distance(sleep_categorical_logit_adjusted)) %>%
+  mutate(influential_points=row_number()) %>%
+  filter(`cooks.distance(sleep_categorical_logit_adjusted)` > cutoff)
+
+
+## exclude the values shown in the Cook's D plot, and see how the models compare.
+sleep_categorical_logit_adjusted_influential <- update(sleep_categorical_logit_adjusted,subset=c(-influential_points$influential_points))
+summary(sleep_categorical_logit_adjusted_influential)
+
+## compare coefficients between models with and without influential observations
+compareCoefs(sleep_categorical_logit_adjusted, sleep_categorical_logit_adjusted_influential) 
+```
+
+```{r goodness of fit tests}
+#Various pseudo R squares, log likelihood, deviance, AIC, BIC
+blr_model_fit_stats(sleep_categorical_logit_adjusted)
+
+#Hosmer lemeshow goodness of fit test: a significant p value indicates a bad fit
+blr_test_hosmer_lemeshow(sleep_categorical_logit_adjusted)
+```
+
+```{r LR test}
+#likeilihood ratio test: compare two nested models
+lrtest(sleep_categorical_logit_adjusted, sleep_categorical_logit_adjusted_em)
+```
+
+
+
+
